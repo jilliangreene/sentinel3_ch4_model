@@ -1,2 +1,5 @@
 venv/
 *.csv
+testing
+output_tif
+ALL_DRMs
