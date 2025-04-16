@@ -1,5 +1,6 @@
 venv/
 *.csv
 testing
-output_tif
+output_tifs
 ALL_DRMs
+multiband_rasters
