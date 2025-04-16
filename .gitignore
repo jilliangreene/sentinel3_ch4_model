@@ -4,3 +4,4 @@ testing
 output_tifs
 ALL_DRMs
 multiband_rasters
+*.zip
