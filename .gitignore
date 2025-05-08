@@ -1,8 +1,8 @@
 venv/
 *.csv
 testing
-output_tifs
+model_output_tifs
 ALL_DRMs
-multiband_rasters
+per_lake_rasters
 *.zip
 figs

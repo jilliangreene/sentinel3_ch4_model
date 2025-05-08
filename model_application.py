@@ -7,32 +7,49 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 from rasterio.mask import mask
 
-# Configuration
-plot_vis = True  # Set to False to disable plotting
-input_folder = 'multiband_rasters/'
-output_folder = 'output_tifs/'
-shapefile_path = 'ALL_DRMs/ALL_DRMs.shp'
+# --- Configuration ---
+plot_vis = True
+input_folder = 'per_lake_rasters/'
+output_folder = 'model_output_tifs/'
+shapefile_path = 'ALL_DRMs/attachments/Jillians_DRMs_polygons.shp'
+model_path = 'etr_final.joblib'
 os.makedirs(output_folder, exist_ok=True)
 
-# Load trained model
-model = joblib.load('etr_example.joblib')
-
-# Load and reproject shapefile to match raster
+# --- Load trained model and shapefile ---
+model = joblib.load(model_path)
 clip_gdf = gpd.read_file(shapefile_path)
+
+def extract_fid_from_filename(filename):
+    """Extracts fid_1 from filenames like lake_12.0_20240610.tif or lake_12_20240610.tif"""
+    base = os.path.basename(filename)
+    try:
+        parts = base.replace('.tif', '').split('_')
+        # Convert float strings like '12.0' to int
+        return int(float(parts[1]))  # e.g., '12.0' -> 12
+    except (IndexError, ValueError):
+        return None
 
 def ml_raster(raster_path, output_path):
     with rasterio.open(raster_path) as src:
-        if clip_gdf.crs != src.crs:
-            print("Reprojecting shapefile to match raster CRS...")
-            gdf_local = clip_gdf.to_crs(src.crs)
-        else:
-            gdf_local = clip_gdf
+        fid = extract_fid_from_filename(raster_path)
+        if fid is None:
+            print(f"Skipping {raster_path} — could not parse fid_1.")
+            return
 
-        clip_shapes = [feature["geometry"] for feature in gdf_local.__geo_interface__['features']]
-        
-        print(f"Clipping and predicting for {os.path.basename(raster_path)}...")
-        clipped_data, clipped_transform = mask(src, clip_shapes, crop=True)
-        masked_data, _ = mask(src, clip_shapes, crop=True, filled=False)
+        # Match geometry by fid_1
+        lake_geom = clip_gdf[clip_gdf['fid_1'] == fid]
+        if lake_geom.empty:
+            print(f"No matching geometry for fid_1={fid} — skipping.")
+            return
+
+        # Clip raster to lake geometry
+        geom = lake_geom.geometry.values[0]
+        try:
+            clipped_data, clipped_transform = mask(src, [geom], crop=True)
+            masked_data, _ = mask(src, [geom], crop=True, filled=False)
+        except Exception as e:
+            print(f" Masking error for fid_1={fid}: {e}")
+            return
 
         bands, height, width = clipped_data.shape
         reshaped_data = clipped_data.reshape(bands, -1).T
@@ -43,19 +60,20 @@ def ml_raster(raster_path, output_path):
         combined_mask = geometry_mask | nodata_mask
 
         valid_data = reshaped_data[~combined_mask]
-        print(f"Valid pixels: {valid_data.shape[0]}")
-
-        if valid_data.shape[0] == 0:
-            print("No valid pixels to predict — skipping.")
+        if valid_data.size == 0:
+            print(f" No valid pixels to predict for fid_1={fid}.")
             return
 
+        # Predict using the model
         predictions = model.predict(valid_data)
 
+        # Build prediction raster
         prediction_raster = np.full((height * width,), nodata, dtype='float32')
         prediction_raster[~combined_mask] = predictions
         prediction_raster = prediction_raster.reshape((height, width))
 
-        profile = src.profile
+        # Save prediction raster
+        profile = src.profile.copy()
         profile.update({
             'height': height,
             'width': width,
@@ -66,27 +84,27 @@ def ml_raster(raster_path, output_path):
             'nodata': nodata
         })
 
-        print(f"Writing output to: {output_path}")
+        print(f" Writing prediction for lake {fid} to: {output_path}")
         with rasterio.open(output_path, 'w', **profile) as dst:
             dst.write(prediction_raster, 1)
 
+        # Optional plotting
         if plot_vis:
             plt.figure(figsize=(8, 6))
-            show_data = np.ma.masked_equal(prediction_raster, nodata)
-            plt.imshow(show_data, cmap='viridis')
-            plt.title(f'Prediction - {os.path.basename(raster_path)} (Masked to Shape)')
+            plt.imshow(np.ma.masked_equal(prediction_raster, nodata), cmap='viridis')
+            plt.title(f'Prediction — Lake {fid}')
             plt.colorbar(label='Prediction')
             plt.axis('off')
             plt.show()
 
 
-# Process all rasters
+# --- Run over all rasters ---
 raster_files = glob.glob(os.path.join(input_folder, '*.tif'))
-
 if not raster_files:
-    print("No rasters found!")
+    print(" No rasters found in input folder.")
 
 for raster_file in raster_files:
     filename = os.path.basename(raster_file)
-    output_path = os.path.join(output_folder, filename)
+    output_path = os.path.join(output_folder, filename.replace('.tif', '_pred.tif'))
     ml_raster(raster_file, output_path)
+
